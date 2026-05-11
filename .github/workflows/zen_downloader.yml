@@ -1,0 +1,59 @@
+name: Download Zen Browser (DEB)
+
+on:
+  schedule:
+    # اجرای خودکار هر روز ساعت 00:00 (اختیاری)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # امکان اجرای دستی
+
+jobs:
+  update-zen:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # برای آپلود در ریلیز نیاز است
+      
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Get Latest Version of Zen Browser
+        id: get_version
+        run: |
+          # دریافت آخرین نسخه از GitHub API
+          LATEST_VERSION=$(curl -s https://api.github.com/repos/zen-browser/desktop/releases/latest | grep -Po '"tag_name": "\K[^"]+')
+          echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "Latest version found: $LATEST_VERSION"
+
+      - name: Download Zen Browser (Linux)
+        run: |
+          VERSION=${{ steps.get_version.outputs.version }}
+          # دانلود فایل .deb برای لینوکس (حدود 87 مگابایت)
+          wget "https://github.com/zen-browser/desktop/releases/download/${VERSION}/zen-browser-${VERSION}.deb" -O zen-browser.deb
+          echo "Download completed"
+
+      - name: Split into 90MB RAR parts
+        run: |
+          # نصب ابزار rar
+          sudo apt-get update
+          sudo apt-get install -y rar
+          
+          # ایجاد پوشه برای خروجی
+          mkdir -p zen
+          
+          # تقسیم فایل به پارت‌های 90 مگابایتی
+          rar a -v90m -m5 -ep1 zen/zen-browser.rar zen-browser.deb
+          
+          echo "Split completed. Generated files:"
+          ls -lh zen/
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: zen-${{ steps.get_version.outputs.version }}-${{ github.run_number }}
+          name: "Zen Browser ${{ steps.get_version.outputs.version }}"
+          body: |
+            آخرین نسخه Zen Browser
+            تاریخ آپلود: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+            
+            فایل‌ها به پارت‌های ۹۰ مگابایتی RAR تقسیم شده‌اند.
+            برای extract کردن تمام پارت‌ها را دانلود کرده و دستور زیر را اجرا کنید:
