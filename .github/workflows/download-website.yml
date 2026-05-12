@@ -16,17 +16,36 @@ jobs:
       
       - name: Download
         run: |
-          wget -r -k -p -E -np -e robots=off "${{ github.event.inputs.site_url }}" || true
+          wget \
+            -r \
+            -l inf \
+            -k \
+            -p \
+            -E \
+            -np \
+            --wait=2 \
+            --random-wait \
+            --tries=3 \
+            --timeout=30 \
+            --no-clobber \
+            --continue \
+            --ignore-length \
+            --retry-connrefused \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --execute robots=off \
+            --reject="*.tmp,*.log" \
+            "${{ github.event.inputs.site_url }}" \
+            2>&1 | grep -v "ERROR 404" | grep -v "ERROR 403" | grep -v "ERROR 401" || true
       
       - name: Zip
         run: |
           sudo apt-get install -y zip
-          zip -r -s 95m backup.zip ./
+          zip -r -s 95m backup.zip ./ || true
       
       - name: Push
         run: |
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
-          git add backup.zip*
-          git commit -m "Add website backup" || true
+          git add backup.zip* 2>/dev/null || true
+          git commit -m "Add website backup" 2>/dev/null || true
           git push
