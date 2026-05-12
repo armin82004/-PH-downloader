@@ -1,0 +1,365 @@
+name: دانلود کامل سایت (حتی React) و تبدیل به RAR
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_url:
+        description: 'آدرس کامل سایتی که می‌خواهید دانلود کنید (مثال: https://example.com)'
+        required: true
+        type: string
+        default: 'https://react-example.com'
+      max_depth:
+        description: 'عمق لینک‌هایی که دنبال شود (برای سایت React معمولاً 1 کافی است)'
+        required: false
+        type: number
+        default: 2
+      wait_time:
+        description: 'زمان انتظار بین درخواست‌ها (میلی‌ثانیه) برای جلوگیری از blocking'
+        required: false
+        type: number
+        default: 1000
+      part_size:
+        description: 'حجم هر پارت RAR (مثال: 95m, 50m, 200m)'
+        required: false
+        type: string
+        default: '95m'
+
+jobs:
+  download-and-package:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-version@v4
+      with:
+        node-version: '20'
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget rar unrar chromium-browser
+
+    - name: Install Node.js dependencies
+      run: |
+        npm install -g wgetjs puppeteer single-file-cli
+        npm install puppeteer
+        # یا نصب محلی
+        npm install puppeteer
+
+    - name: Create necessary directories
+      run: |
+        mkdir -p downloads
+        mkdir -p scripts
+        mkdir -p output
+
+    - name: Setup download script
+      run: |
+        cat > scripts/download-react-site.js << 'EOF'
+        const puppeteer = require('puppeteer');
+        const fs = require('fs');
+        const path = require('path');
+        const https = require('https');
+        const http = require('http');
+        const { exec } = require('child_process');
+        const { promisify } = require('util');
+        const execAsync = promisify(exec);
+
+        const siteUrl = process.env.SITE_URL;
+        const maxDepth = parseInt(process.env.MAX_DEPTH) || 2;
+        const waitTime = parseInt(process.env.WAIT_TIME) || 1000;
+        const downloadDir = process.env.DOWNLOAD_DIR || './downloads';
+
+        console.log('========================================');
+        console.log('شروع دانلود سایت React:', siteUrl);
+        console.log('عمق جستجو:', maxDepth);
+        console.log('========================================');
+
+        // ایجاد دایرکتوری دانلود
+        if (!fs.existsSync(downloadDir)) {
+          fs.mkdirSync(downloadDir, { recursive: true });
+        }
+
+        // تابع دانلود فایل با wget (برای فایل‌های استاتیک)
+        async function downloadWithWget(url, outputPath) {
+          try {
+            await execAsync(`wget --quiet --no-clobber --timeout=30 --tries=3 "${url}" -O "${outputPath}"`);
+            return true;
+          } catch (error) {
+            console.error(`خطا در دانلود با wget: ${url}`, error.message);
+            return false;
+          }
+        }
+
+        // تابع ذخیره HTML صفحه بعد از رندر شدن
+        async function saveRenderedPage(page, url, outputPath) {
+          try {
+            await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+            
+            // منتظر می‌مانیم تا React کاملاً رندر شود
+            await page.waitForTimeout(waitTime);
+            
+            // صبر برای لود شدن تصاویر و فونت‌ها
+            await page.evaluate(() => {
+              return Promise.all(
+                Array.from(document.images)
+                  .filter(img => !img.complete)
+                  .map(img => new Promise(resolve => { img.onload = img.onerror = resolve; }))
+              );
+            });
+            
+            // گرفتن HTML نهایی بعد از رندر React
+            const html = await page.content();
+            
+            // ذخیره فایل
+            fs.writeFileSync(outputPath, html);
+            console.log(`ذخیره شد: ${outputPath}`);
+            return true;
+          } catch (error) {
+            console.error(`خطا در ذخیره صفحه ${url}:`, error.message);
+            return false;
+          }
+        }
+
+        // استخراج لینک‌های داخلی از صفحه
+        async function extractInternalLinks(page, baseUrl, currentDepth) {
+          if (currentDepth > maxDepth) return [];
+          
+          const links = await page.evaluate((base) => {
+            const anchors = document.querySelectorAll('a[href]');
+            const linksSet = new Set();
+            
+            anchors.forEach(anchor => {
+              let href = anchor.getAttribute('href');
+              if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+              
+              // تبدیل لینک‌های نسبی به مطلق
+              try {
+                const absoluteUrl = new URL(href, base).href;
+                const urlObj = new URL(absoluteUrl);
+                
+                // فقط لینک‌های هم‌دامنه
+                if (urlObj.hostname === new URL(base).hostname) {
+                  // حذف هش و پارامترهای اضافی
+                  const cleanUrl = absoluteUrl.split('#')[0].split('?')[0];
+                  linksSet.add(cleanUrl);
+                }
+              } catch (e) {
+                // نادیده گرفتن لینک‌های نامعتبر
+              }
+            });
+            
+            return Array.from(linksSet);
+          }, baseUrl);
+          
+          return links;
+        }
+
+        // دانلود منابع استاتیک (CSS, JS, Images)
+        async function downloadStaticResources(page, baseUrl) {
+          console.log('در حال استخراج منابع استاتیک...');
+          
+          const resources = await page.evaluate(() => {
+            const resources = {
+              css: [],
+              js: [],
+              images: []
+            };
+            
+            // CSS files
+            document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+              if (link.href) resources.css.push(link.href);
+            });
+            
+            // JS files
+            document.querySelectorAll('script[src]').forEach(script => {
+              if (script.src) resources.js.push(script.src);
+            });
+            
+            // Images
+            document.querySelectorAll('img[src]').forEach(img => {
+              if (img.src) resources.images.push(img.src);
+            });
+            
+            return resources;
+          });
+          
+          const allResources = [...resources.css, ...resources.js, ...resources.images];
+          
+          for (const resourceUrl of allResources) {
+            try {
+              const urlObj = new URL(resourceUrl);
+              const pathname = urlObj.pathname;
+              const localPath = path.join(downloadDir, pathname);
+              const localDir = path.dirname(localPath);
+              
+              if (!fs.existsSync(localDir)) {
+                fs.mkdirSync(localDir, { recursive: true });
+              }
+              
+              await downloadWithWget(resourceUrl, localPath);
+              console.log(`منبع دانلود شد: ${pathname}`);
+            } catch (error) {
+              console.error(`خطا در دانلود منبع: ${resourceUrl}`);
+            }
+          }
+        }
+
+        // تابع اصلی
+        async function main() {
+          const browser = await puppeteer.launch({
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+          });
+          
+          const page = await browser.newPage();
+          
+          // تنظیم User-Agent
+          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+          
+          // بازدید شده‌ها
+          const visited = new Set();
+          const queue = [siteUrl];
+          
+          while (queue.length > 0) {
+            const currentUrl = queue.shift();
+            
+            if (visited.has(currentUrl)) continue;
+            visited.add(currentUrl);
+            
+            console.log(`\n📄 در حال پردازش: ${currentUrl}`);
+            
+            // تعیین مسیر ذخیره
+            const urlObj = new URL(currentUrl);
+            let filePath;
+            
+            if (currentUrl === siteUrl || currentUrl === siteUrl + '/') {
+              filePath = path.join(downloadDir, 'index.html');
+            } else {
+              let pathname = urlObj.pathname;
+              if (pathname.endsWith('/')) {
+                pathname = pathname + 'index.html';
+              } else if (!path.extname(pathname)) {
+                pathname = pathname + '.html';
+              }
+              filePath = path.join(downloadDir, pathname);
+            }
+            
+            const fileDir = path.dirname(filePath);
+            if (!fs.existsSync(fileDir)) {
+              fs.mkdirSync(fileDir, { recursive: true });
+            }
+            
+            // ذخیره صفحه رندر شده
+            await saveRenderedPage(page, currentUrl, filePath);
+            
+            // دانلود منابع استاتیک
+            await downloadStaticResources(page, currentUrl);
+            
+            // استخراج لینک‌های جدید
+            const newLinks = await extractInternalLinks(page, currentUrl, visited.size);
+            
+            for (const link of newLinks) {
+              if (!visited.has(link)) {
+                queue.push(link);
+              }
+            }
+            
+            console.log(`✅ پردازش شد: ${currentUrl} (${visited.size} از ???)`);
+            
+            // تاخیر بین درخواست‌ها
+            await page.waitForTimeout(waitTime);
+          }
+          
+          await browser.close();
+          console.log('\n🎉 دانلود کامل شد!');
+          console.log(`تعداد صفحات دانلود شده: ${visited.size}`);
+          
+          // ایجاد فایل لیست محتویات
+          const manifest = {
+            site_url: siteUrl,
+            download_date: new Date().toISOString(),
+            pages_count: visited.size,
+            pages: Array.from(visited)
+          };
+          
+          fs.writeFileSync(
+            path.join(downloadDir, 'manifest.json'),
+            JSON.stringify(manifest, null, 2)
+          );
+        }
+        
+        main().catch(console.error);
+        EOF
+
+    - name: Download React website
+      env:
+        SITE_URL: ${{ github.event.inputs.site_url }}
+        MAX_DEPTH: ${{ github.event.inputs.max_depth }}
+        WAIT_TIME: ${{ github.event.inputs.wait_time }}
+        DOWNLOAD_DIR: ./downloads
+      run: |
+        node scripts/download-react-site.js
+
+    - name: Fix relative paths in HTML files
+      run: |
+        cd downloads
+        # تبدیل لینک‌های مطلق به نسبی در فایل‌های HTML
+        find . -name "*.html" -type f -exec sed -i 's|https://[^/]*/|./|g' {} \;
+        find . -name "*.html" -type f -exec sed -i 's|http://[^/]*/|./|g' {} \;
+
+    - name: Create RAR archives (95MB parts)
+      run: |
+        cd downloads
+        echo "Creating RAR archives of ${{ github.event.inputs.part_size }}..."
+        
+        # پیدا کردن نام دامنه از آدرس
+        DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed -e 's|https\?://||' -e 's|/.*$||' -e 's|\.|_|g')
+        
+        # نصب rar اگر نصب نیست
+        sudo apt-get install -y rar
+        
+        # ایجاد آرشیو RAR با پارت‌های 95 مگابایتی
+        rar a -v${{ github.event.inputs.part_size }} -m5 -rr10% -ep1 "../output/${DOMAIN}.rar" ./
+        
+        echo "RAR files created successfully!"
+        ls -lh ../output/
+
+    - name: List all created parts
+      run: |
+        echo "✅ فایل‌های RAR ساخته شده:"
+        ls -lh output/*.part*.rar output/*.rar 2>/dev/null || echo "هیچ فایل RAR یافت نشد"
+
+    - name: Upload to GitHub Release (optional)
+      if: success()
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: website-mirror-${{ github.run_number }}
+        name: "Mirror of ${{ github.event.inputs.site_url }}"
+        body: |
+          آرشیو کامل سایت ${{ github.event.inputs.site_url }}
+          
+          تاریخ دانلود: $(date)
+          حجم کل: (در فایل‌ها مشخص است)
+          
+          نحوه استفاده:
+          1. تمام فایل‌های part*.rar را دانلود کنید
+          2. با نرم‌افزار WinRAR یا rar در لینوکس extract کنید
+          3. فایل index.html را باز کنید
+        files: |
+          output/*.rar
+          output/*.part*.rar
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload artifacts to workflow
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: website-mirror-${{ github.run_number }}
+        path: |
+          output/*.rar
+          output/*.part*.rar
+        retention-days: 7
