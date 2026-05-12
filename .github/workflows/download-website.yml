@@ -1,4 +1,4 @@
-name: Full Mirror with HTTrack + Puppeteer
+name: Download React Site
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         type: string
 
 jobs:
-  full-mirror:
+  download:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,60 +19,18 @@ jobs:
         with:
           node-version: '20'
       
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y httrack
-          npm install -g puppeteer
+      - name: Install SingleFile
+        run: npm install -g single-file-cli
       
-      - name: First pass - Get page structure
+      - name: Download with SingleFile
         run: |
-          httrack "${{ github.event.inputs.site_url }}" -O "./mirror" --depth=2 --robots=0 || true
-      
-      - name: Second pass - Render JavaScript pages
-        run: |
-          node << 'EOF'
-          const puppeteer = require('puppeteer');
-          const fs = require('fs');
-          const path = require('path');
-          
-          (async () => {
-            const browser = await puppeteer.launch({ headless: "new" });
-            const page = await browser.newPage();
-            
-            // پیدا کردن و رندر کردن صفحات HTML
-            const findAndRender = async (dir) => {
-              const files = fs.readdirSync(dir);
-              for (const file of files) {
-                const fullPath = path.join(dir, file);
-                if (fs.statSync(fullPath).isDirectory()) {
-                  await findAndRender(fullPath);
-                } else if (file.endsWith('.html')) {
-                  console.log(`Rendering: ${fullPath}`);
-                  await page.goto(`file://${fullPath}`, { waitUntil: 'networkidle2' });
-                  await page.waitForTimeout(3000);
-                  const content = await page.content();
-                  fs.writeFileSync(fullPath, content);
-                }
-              }
-            };
-            
-            await findAndRender('./mirror');
-            await browser.close();
-          })();
-          EOF
-      
-      - name: Compress and Upload
-        run: |
-          sudo apt-get install -y zip
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
           DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||' | sed 's|\.|_|g')
-          ZIP_NAME="backup_${DOMAIN}_${TIMESTAMP}"
           
-          zip -r -s 95m "${ZIP_NAME}.zip" ./mirror/
+          single-file "${{ github.event.inputs.site_url }}" "./${DOMAIN}_${TIMESTAMP}.html"
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${ZIP_NAME}.zip* 2>/dev/null || true
-          git commit -m "Add full mirror with JS rendering" 2>/dev/null || true
+          git add *.html 2>/dev/null || true
+          git commit -m "Add React page backup" 2>/dev/null || true
           git push
