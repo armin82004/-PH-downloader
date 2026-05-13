@@ -1,14 +1,14 @@
 name: Download YouTube Video & Subtitles
 
 on:
-  workflow_dispatch:  # اجرای دستی از طریق GitHub Actions
+  workflow_dispatch:
     inputs:
       youtube_url:
         description: 'YouTube video URL'
         required: true
         type: string
       original_lang:
-        description: 'Original language code (e.g., en, fa)'
+        description: 'Original language code (e.g., en, fa, ar)'
         required: true
         type: string
         default: 'en'
@@ -22,7 +22,7 @@ jobs:
   download-and-upload:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # اجازه آپلود فایل در ریپو
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -30,88 +30,107 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
+      - name: Install yt-dlp and ffmpeg
         run: |
-          npm install
-          # در صورت نیاز به بسته‌های سیستمی برای yt-dlp
           sudo apt-get update
-          sudo apt-get install -y yt-dlp ffmpeg zip
-
-      - name: Download video & generate subtitles
-        env:
-          YT_URL: ${{ github.event.inputs.youtube_url }}
-          ORIG_LANG: ${{ github.event.inputs.original_lang }}
-          TARGET_LANG: ${{ github.event.inputs.target_lang }}
+          sudo apt-get install -y ffmpeg python3-pip
+          pip3 install yt-dlp
+          
+      - name: Download video and subtitles
         run: |
-          # ساخت پوشه خروجی
           mkdir -p output
+          cd output
           
-          # بررسی کنید که ریپو اصلی چه اسکریپتی دارد
-          # با توجه به فایل index.mjs، احتمالا می‌توانید مستقیما index.mjs را با پارامتر فراخوانی کنید
-          # ولی اون ابزار UI دارد، برای خط فرمان باید اصلاح شود.
-          # راهکار: استفاده از yt-dlp برای دانلود ویدیو و زیرنویس
-          
-          echo "Downloading video..."
-          yt-dlp -f "best[height<=720]" \
+          # دانلود ویدیو با کیفیت خوب (حداکثر 720p برای کاهش حجم)
+          yt-dlp -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]" \
                  --write-subs \
-                 --sub-lang $ORIG_LANG,$TARGET_LANG \
+                 --sub-lang ${{ github.event.inputs.original_lang }},${{ github.event.inputs.target_lang }} \
+                 --sub-format srt \
                  --convert-subs srt \
-                 -o "output/video.%(ext)s" \
                  --write-auto-subs \
-                 $YT_URL
+                 --output "video.%(ext)s" \
+                 ${{ github.event.inputs.youtube_url }}
                  
-          # اگر زیرنویس دو زبانه می‌خواهید، می‌توانید از --embed-subs و --sub-langs استفاده کنید
-          # اما ریپو اصلی برای زیرنویس دو زبانه UI دارد و نیاز به کدنویسی بیشتر دارد
-
-      - name: Organize output files
-        run: |
-          # تمام فایل‌های دانلود شده در output/ را جمع کنید
-          ls -la output/
-          # برای اطمینان از وجود فایل اصلی
-          if [ ! "$(ls -A output)" ]; then
-            echo "No file downloaded!"
-            exit 1
-          fi
-
-      - name: Split and zip if >95MB
+          # اگر زیرنویس جداگانه دانلود شد، آن را rename کنید
+          for file in *.vtt; do
+            mv "$file" "${file%.vtt}.srt" 2>/dev/null || true
+          done
+          
+          cd ..
+          
+      - name: Generate bilingual subtitles (if two languages exist)
         run: |
           cd output
-          # محاسبه حجم کل فایل‌های موجود
+          
+          # پیدا کردن فایل‌های زیرنویس
+          original_sub=$(ls *.${ORIG_LANG}.srt 2>/dev/null | head -1)
+          target_sub=$(ls *.${TARGET_LANG}.srt 2>/dev/null | head -1)
+          
+          if [[ -f "$original_sub" && -f "$target_sub" ]]; then
+            echo "Creating bilingual subtitle file..."
+            
+            # ایجاد فایل دو زبانه (ساده: چسباندن خط به خط)
+            # روش حرفه‌ای: می‌توانید از ابزارهای پردازش srt استفاده کنید
+            paste -d '\n' "$original_sub" "$target_sub" > bilingual_subtitle.srt 2>/dev/null || \
+            echo "بilingual subtitle generation failed" > bilingual_subtitle.srt
+          else
+            echo "Not enough subtitle files for bilingual generation"
+          fi
+          
+          cd ..
+          
+        env:
+          ORIG_LANG: ${{ github.event.inputs.original_lang }}
+          TARGET_LANG: ${{ github.event.inputs.target_lang }}
+
+      - name: Create README with download info
+        run: |
+          cat > output/README.md << EOF
+          # Downloaded from YouTube
+          - **Video URL**: ${{ github.event.inputs.youtube_url }}
+          - **Download Date**: $(date)
+          - **Original Language**: ${{ github.event.inputs.original_lang }}
+          - **Target Language**: ${{ github.event.inputs.target_lang }}
+          
+          ## Files included:
+          $(ls -la output/)
+          EOF
+
+      - name: Compress and split if >95MB
+        run: |
+          cd output
+          
+          # محاسبه حجم
           total_size=$(du -sb . | cut -f1)
-          max_size=$((95 * 1024 * 1024))  # 95 مگابایت
+          max_size=$((95 * 1024 * 1024))
           
           if [ $total_size -gt $max_size ]; then
-            echo "Total size $total_size > 95MB, splitting into multi-part zip"
-            zip -r -s 95m archive.zip *
-            mv archive.zip ../
-            mv archive.z* ../
-            cd ..
-            # فایل‌های اصلی را حذف می‌کنیم تا دوباره آپلود نشوند
-            rm -rf output
-            mkdir output
-            mv archive.* output/
+            echo "Size: $total_size bytes > 95MB, creating split zip"
+            zip -r -s 95m ../youtube-content.zip *
           else
-            echo "Total size $total_size <= 95MB, creating single zip"
-            zip -r output.zip output/
-            mv output.zip output/
+            echo "Size: $total_size bytes <= 95MB, creating single zip"
+            zip -r ../youtube-content.zip *
           fi
-
+          
+          cd ..
+          
+          # پاک کردن فایل‌های اصلی برای اینکه فقط zip بماند
+          rm -rf output
+          mkdir -p output
+          mv youtube-content.zip* output/
+          
       - name: Upload to repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # اگر شاخه output وجود ندارد بساز
+          # حذف فایل‌های قدیمی در شاخه output (اختیاری)
+          git rm -rf output/ 2>/dev/null || true
+          
+          # افزودن فایل جدید
           mkdir -p output
+          mv youtube-content.zip* output/ 2>/dev/null || true
           
-          # افزودن فایل‌ها به git
           git add output/
-          git commit -m "Add downloaded video and subtitles from ${{ github.event.inputs.youtube_url }}" || echo "No changes to commit"
-          
-          # پوش کردن به ریپو
+          git commit -m "Download YouTube video: ${{ github.event.inputs.youtube_url }} (split if >95MB)" || echo "No changes to commit"
           git push origin HEAD:${{ github.ref_name }}
