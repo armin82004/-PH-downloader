@@ -1,48 +1,83 @@
-name: MHTML ذخیره صفحه به (نسخه جایگزین)
+name: MHTML Download with Stealth
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'URL of the webpage to download'
         required: true
         type: string
-      title:
-        description: 'Optional title for the output file'
-        required: false
-        type: string
-
-permissions:
-  contents: write
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install single-file
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser
-          npm install -g single-file-cli
-      
-      - name: Download page as MHTML
-        run: |
-          mkdir -p download
-          if [ -z "${{ github.event.inputs.title }}" ]; then
-            FILENAME="page_$(date +%Y%m%d_%H%M%S).mhtml"
-          else
-            FILENAME="${{ github.event.inputs.title }}.mhtml"
-          fi
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
           
-          single-file "${{ github.event.inputs.url }}" "download/${FILENAME}"
-          
-      - name: Commit and push
+      - name: Install playwright with stealth
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add download/
-          git commit -m "Add MHTML for ${{ github.event.inputs.url }}" || echo "No changes"
-          git push
+          npm init -y
+          npm install playwright playwright-extra puppeteer-extra-plugin-stealth
+          npx playwright install chromium
+          
+      - name: Create download script
+        run: |
+          cat > download.js << 'EOF'
+          const { chromium } = require('playwright-extra');
+          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+          chromium.use(StealthPlugin());
+          
+          async function downloadPage(url) {
+              const browser = await chromium.launch({
+                  headless: true,
+                  args: ['--no-sandbox', '--disable-setuid-sandbox']
+              });
+              
+              const context = await browser.newContext({
+                  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                  viewport: { width: 1920, height: 1080 }
+              });
+              
+              const page = await context.newPage();
+              
+              // اضافه کردن هدرهای واقعی
+              await page.setExtraHTTPHeaders({
+                  'Accept-Language': 'en-US,en;q=0.9',
+                  'Accept-Encoding': 'gzip, deflate, br',
+                  'Referer': 'https://www.google.com/'
+              });
+              
+              try {
+                  await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+                  await page.waitForTimeout(5000);
+                  
+                  // ذخیره MHTML
+                  const client = await page.context().newCDPSession(page);
+                  const { data } = await client.send('Page.captureSnapshot');
+                  
+                  require('fs').writeFileSync('download/page.mhtml', data);
+                  console.log('Downloaded successfully');
+              } catch(e) {
+                  console.error('Error:', e.message);
+                  // ذخیره اسکرین‌شوت برای دیباگ
+                  await page.screenshot({ path: 'error.png' });
+              }
+              
+              await browser.close();
+          }
+          
+          downloadPage(process.argv[2]);
+          EOF
+          
+      - name: Run downloader
+        run: node download.js "${{ github.event.inputs.url }}"
+        
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-page
+          path: download/
